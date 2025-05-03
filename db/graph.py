@@ -3,7 +3,6 @@ import json
 from typing import List, Optional
 from configs.constants import DB_PATH
 
-
 def upsert_channel(
     handle: str,
     visited: bool = False,
@@ -31,14 +30,12 @@ def upsert_channel(
             """, (handle, visited, priority, json.dumps([])))
     conn.close()
 
-
 def get_all_channels() -> List[str]:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.execute("SELECT handle FROM channel_graph")
     channels = [row[0] for row in cursor.fetchall()]
     conn.close()
     return channels
-
 
 def get_last_msg_id(handle: str) -> Optional[int]:
     if not handle.startswith("@"):

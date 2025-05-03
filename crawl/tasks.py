@@ -1,5 +1,6 @@
 from __future__ import annotations
-import re, time
+import re
+import time
 from typing import List, Optional, Tuple, Set
 
 import ray
@@ -22,61 +23,50 @@ def _extract_handles(msg) -> Set[str]:
     return handles
 
 @ray.remote
-def crawl_channel_remote(
-    session_name: str,
-    channel: str,
-    limit: int,
-    queue_actor: Optional[ray.actor.ActorHandle] = None
-) -> Tuple[str, List[dict], Optional[int], bool]:
-    channel = channel.lower()
-    client: TelegramClient = load_client(session_name)
+def crawl_channel_remote(session_name: str, channel: str, limit: int, queue_actor: Optional[ray.actor.ActorHandle] = None) -> Tuple[str, List[dict], Optional[int], bool]:
 
+    last_seen = get_last_msg_id(channel) or 0
+    messages: List[dict] = []
+    max_fetched_id: Optional[int] = None
+    new_relevant = False
     try:
-        last_seen = get_last_msg_id(channel) or 0
-        messages, max_seen = [], None
+        with load_client(session_name) as client:
 
-        for msg in client.iter_messages(
-                channel,
-                limit=limit,
-                offset_id=last_seen,
-                reverse=True):
-            if not msg.message:
-                continue
-            clean = clean_text(msg.message)
-            if not clean or not contains_fidel(clean):
-                continue
+            while True:
+                try:
+                    for msg in client.iter_messages(channel, limit=limit, offset_id=last_seen, reverse=True):
+                        max_fetched_id = msg.id
+                        if not msg.message:
+                            continue
 
-            messages.append(
-                to_message_dict(
-                    msg_id=msg.id,
-                    channel=channel,
-                    text=clean,
-                    date=msg.date.isoformat(),
-                    url=f"https://t.me/{channel.strip('@')}/{msg.id}",
-                    session_id=session_name,
-                    raw_json=str(msg.to_dict())
-                )
-            )
-            max_seen = msg.id
+                        clean = clean_text(msg.message)
+                        if not clean or not contains_fidel(clean):
+                            continue
 
-            for h in _extract_handles(msg):
-                upsert_channel(h, priority=BASE_PRIORITY)
-                if queue_actor:
-                    queue_actor.push.remote(h, BASE_PRIORITY)
-
-        should_requeue = bool(messages)
-        return channel, messages, max_seen, should_requeue
+                        messages.append(to_message_dict(
+                            msg_id=msg.id,
+                            channel=channel,
+                            text=clean,
+                            date=msg.date.isoformat(),
+                            url=f"https://t.me/{channel.strip('@')}/{msg.id}",
+                            session_id=session_name,
+                            raw_json=str(msg.to_dict()),
+                        ))
+                        new_relevant = True
+                        for h in _extract_handles(msg):
+                            if h == channel:
+                                continue
+                            upsert_channel(h, priority=BASE_PRIORITY)
+                            if queue_actor:
+                                queue_actor.push.remote(h, BASE_PRIORITY)
+                    break
+                except FloodWaitError as e:
+                    time.sleep(e.seconds + 1)
+        should_requeue = new_relevant
+        return channel, messages, max_fetched_id, should_requeue
 
     except (UsernameInvalidError, UsernameNotOccupiedError):
         return channel, [], last_seen, False
-
-    except FloodWaitError as e:
-        wait = e.seconds + 1
-        time.sleep(wait)
-        return crawl_channel_remote(session_name, channel, limit, queue_actor)
-
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ Error in crawl_channel_remote({channel}): {e}")
         return channel, [], last_seen, False
-
-    finally:
-        client.disconnect()

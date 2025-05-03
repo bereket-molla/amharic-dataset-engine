@@ -54,3 +54,5 @@ tornado==6.4.2
 typing_extensions==4.13.1
 tzdata==2025.2
 urllib3==2.3.0
+matplotlib>=3.0.0
+ace_tools

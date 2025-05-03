@@ -30,7 +30,6 @@ def _authorise(client: TelegramClient, name: str) -> None:
     except SessionPasswordNeededError:
         password = input("two-step-verification password: ").strip()
         client.sign_in(password=password)
-    print("authorised!")
 
 def load_client(
     session_name: Optional[str] = None,

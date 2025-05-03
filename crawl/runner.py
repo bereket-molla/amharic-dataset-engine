@@ -1,5 +1,6 @@
 import os
-from typing import List, Optional
+import random
+from typing import List, Optional, Dict
 
 import ray
 from sqlite3 import connect
@@ -22,7 +23,6 @@ from crawl.dispatcher import dispatch
 def _discover_session_names() -> List[str]:
     if not os.path.isdir(SESSION_DIR):
         return [DEFAULT_SESSION_NAME]
-
     names = [
         fname[:-8]
         for fname in os.listdir(SESSION_DIR)
@@ -48,39 +48,88 @@ def run_parallel_crawl(
     for handle in (channels or get_all_channels()):
         ray.get(queue.push.remote(handle, BASE_PRIORITY))
 
-    pending_tasks: List[ray.ObjectRef] = []
+    pending: List[ray.ObjectRef] = []
+    prio_by_ref: Dict[ray.ObjectRef, float] = {}
+    chan_by_ref: Dict[ray.ObjectRef, str] = {}
+    iteration = 0
 
     while True:
-        while len(pending_tasks) < max_workers:
-            popped = ray.get(queue.pop.remote())
-            if popped is None:
+        if iteration % 10 == 0:
+            qc = ray.get(queue.get_queue.remote())
+            print(f"\nQueue @ iter {iteration}:")
+            for p, h in sorted(qc, key=lambda x: x[0], reverse=True):
+                print(f"  {p:.2f} → {h}")
+            print("-" * 30)
+
+        while len(pending) < max_workers:
+            item = ray.get(queue.pop.remote())
+            if item is None:
                 break
+            handle, prio = item
+            sess = session_names[len(pending) % num_sessions]
+            ref = dispatch(sess, handle, limit, queue_actor=queue)
 
-            handle, prio = popped
-            sess_name = session_names[len(pending_tasks) % num_sessions]
+            pending.append(ref)
+            prio_by_ref[ref] = prio
+            chan_by_ref[ref] = handle
 
-            pending_tasks.append(
-                dispatch(sess_name, handle, limit, queue_actor=queue)
-            )
-
-        if not pending_tasks:
+        if not pending:
             break
 
-        done, pending_tasks = ray.wait(pending_tasks, num_returns=1)
-        channel, messages, max_id, should_requeue = ray.get(done[0])
+        done, not_ready = ray.wait(pending, num_returns=1, timeout=10)
+
+        if not done:
+            ref = pending.pop(0)
+            old_prio = prio_by_ref.pop(ref, None)
+            channel = chan_by_ref.pop(ref, None)
+
+            print(f"Skipping {channel} (took >10s)")
+            try:
+                ray.cancel(ref)
+            except Exception:
+                pass
+
+            if old_prio is not None:
+                new_prio = old_prio * 0.5
+                if new_prio > 0.001:
+                    queue.push.remote(channel, new_prio)
+            continue
+
+        ref = done[0]
+        pending = not_ready
+
+        old_prio = prio_by_ref.pop(ref, None)
+        channel = chan_by_ref.pop(ref, None)
+
+        try:
+            _, messages, max_id, _ = ray.get(ref)
+        except Exception as e:
+            print(f"Error crawling {channel}: {e}")
+            continue
+
+        print(f"Crawled channel: {channel} → {len(messages)} msg(s)")
 
         if messages:
             with connect(DB_PATH) as conn:
                 for m in messages:
                     insert_message(conn, m)
-            if max_id:
-                update_last_msg_id(channel, max_id)
+        if max_id:
+            update_last_msg_id(channel, max_id)
 
-        if should_requeue:
-            queue.push.remote(channel, prio * 0.5)
+        if len(messages) > 0:
+            new_prio = (old_prio or BASE_PRIORITY) * 1.2
+        else:
+            new_prio = (old_prio or BASE_PRIORITY) * 0.5
+
+        if new_prio > 0.001:
+            queue.push.remote(channel, new_prio)
+
+        iteration += 1
 
     if DEBUG:
-        print(f"Crawl complete. DB: {DB_PATH}")
+        print(f"\nCrawl complete. DB: {DB_PATH}")
+
+    ray.shutdown()
 
 
 if __name__ == "__main__":

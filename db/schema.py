@@ -5,7 +5,6 @@ from configs.constants import DB_PATH
 def init_db() -> None:
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
-
     conn.execute("""
     CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -20,7 +19,6 @@ def init_db() -> None:
         UNIQUE(msg_id, channel)
     )
     """)
-
     conn.execute("""
     CREATE TABLE IF NOT EXISTS channel_graph (
         handle TEXT PRIMARY KEY,
@@ -31,6 +29,5 @@ def init_db() -> None:
         neighbors TEXT
     )
     """)
-
     conn.commit()
     conn.close()
